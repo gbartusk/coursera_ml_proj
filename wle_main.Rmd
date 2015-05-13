@@ -51,9 +51,27 @@ load_data <- function(path)
     df_data <- df_data %>%
         dplyr::rename(row_num = X) %>%
         dplyr::mutate(
-            cvtd_timestamp = lubridate::fast_strptime(cvtd_timestamp, "%m/%d/%Y %H:%M")
-        )
-        
+            cvtd_timestamp = lubridate::fast_strptime(cvtd_timestamp, "%m/%d/%Y %H:%M"),
+            new_window = as.factor(new_window),
+            user_name = as.factor(user_name)
+        ) %>%
+        dplyr::select(-row_num)
+    
+    if ( grepl("training", url_train) )
+    {
+        df_data$classe = as.factor(df_data$classe)
+    }
+    
+    
+    # - many columns that are 90%+ na values, lets drop those
+    # - find variables with more than 90% na
+    #df_na <- data.frame("na_pct" = sapply(df_data, function(x) sum(is.na(x))/length(x)))
+    #df_na$var <- rownames(df_na)
+    #df_na <- df_na %>% dplyr::select(var,na_pct) %>% dplyr::arrange(desc(na_pct))
+    
+    # - remove high pct na columns
+    df_data <- df_data[, colSums(is.na(df_data))/nrow(df_data) < .9]
+    
     # - return
     invisible(df_data)
 }
@@ -70,7 +88,23 @@ url_test <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv
 df_train <- load_data(url_train)
 df_test <- load_data(url_test)
 
+# - check data
+dim(df_train)
+dim(df_test)
 colnames(df_train)[!(colnames(df_train) %in% colnames(df_test))]
+
+```
+
+
+```{r data_vis}
+
+table(df_train$classe)
+table(df_train$user_name)
+table(df_train$cvtd_timestamp)
+
+df_train_num <- df_train %>% dplyr::select(-user_name, -raw_timestamp_part_1, -raw_timestamp_part_2, -cvtd_timestamp)
+
+pairs(df_train_num)
 
 ```
 
