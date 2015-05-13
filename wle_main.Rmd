@@ -1,0 +1,76 @@
+---
+title: "Weight Lifting Exercises"
+output: html_document
+---
+
+```{r global_options, include=FALSE}
+knitr::opts_chunk$set(echo=TRUE, warning=FALSE, message=FALSE)
+```
+
+
+```{r load_pkgs}
+# - load packages
+library(knitr)          # - report writing
+library(ggplot2)        # - plotting
+library(gridExtra)      # - panel plots
+library(dplyr)          # - data manipulation
+library(readr)          # - fast csv reads
+library(RCurl)          # - network interface
+library(lubridate)      # - date functions
+library(Metrics)        # - supervised learning evaluation metrics
+library(ggmap)          # - maps
+library(Hmisc)          # - 
+library(MASS)           # - applied stats methods
+library(class)          # - functions for classification
+library(caret)          # - model training functions
+library(pryr)           # - check memory
+library(rpart)          # - regression trees
+library(rattle)         # - regression tree plots
+library(gbm)            # - boosting with trees
+
+```
+
+
+```{r load_udfs}
+# - load data
+load_data <- function(path)
+{
+    # - required libraries
+    require(RCurl)          # - network interface
+    require(dplyr)          # - data manipulation
+    require(lubridate)      # - date functions
+    
+    # - download the url
+    url_path <- RCurl::getURL(path)
+    
+    # - load data
+    df_data <- read.csv(textConnection(url_path), stringsAsFactors=FALSE,
+        na.strings = c("NA","","#DIV/0!"))
+    
+    # - update
+    df_data <- df_data %>%
+        dplyr::rename(row_num = X) %>%
+        dplyr::mutate(
+            cvtd_timestamp = lubridate::fast_strptime(cvtd_timestamp, "%m/%d/%Y %H:%M")
+        )
+        
+    # - return
+    invisible(df_data)
+}
+    
+```
+
+
+```{r load_data}
+# - file paths
+url_train <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+url_test <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+
+# - load data sets
+df_train <- load_data(url_train)
+df_test <- load_data(url_test)
+
+colnames(df_train)[!(colnames(df_train) %in% colnames(df_test))]
+
+```
+
