@@ -28,6 +28,8 @@ library(rpart)          # - regression trees
 library(rattle)         # - regression tree plots
 library(gbm)            # - boosting with trees
 
+library(PerformanceAnalytics)
+
 ```
 
 
@@ -39,6 +41,9 @@ load_data <- function(path)
     require(RCurl)          # - network interface
     require(dplyr)          # - data manipulation
     require(lubridate)      # - date functions
+    
+    # - debugging
+    #path <- url_test
     
     # - download the url
     url_path <- RCurl::getURL(path)
@@ -57,11 +62,10 @@ load_data <- function(path)
         ) %>%
         dplyr::select(-row_num)
     
-    if ( grepl("training", url_train) )
+    if ( grepl("training", path) )
     {
         df_data$classe = as.factor(df_data$classe)
     }
-    
     
     # - many columns that are 90%+ na values, lets drop those
     # - find variables with more than 90% na
@@ -70,7 +74,11 @@ load_data <- function(path)
     #df_na <- df_na %>% dplyr::select(var,na_pct) %>% dplyr::arrange(desc(na_pct))
     
     # - remove high pct na columns
+    #   no more NA columns in train/test data after this
     df_data <- df_data[, colSums(is.na(df_data))/nrow(df_data) < .9]
+    
+    # - confirm no NAs
+    #sapply(df_data, function(x) sum(is.na(x))/length(x))
     
     # - return
     invisible(df_data)
@@ -102,9 +110,92 @@ table(df_train$classe)
 table(df_train$user_name)
 table(df_train$cvtd_timestamp)
 
-df_train_num <- df_train %>% dplyr::select(-user_name, -raw_timestamp_part_1, -raw_timestamp_part_2, -cvtd_timestamp)
+df_train_num <- df_train %>% dplyr::select(-user_name, -raw_timestamp_part_1, -raw_timestamp_part_2, -cvtd_timestamp, -new_window, -classe)
 
-pairs(df_train_num)
+# - pca: dimension reduction on possibe regressors
+#   PCA is not scale invariant, so it is highly recommended to standardize all the {p} variables before applying PCA. Since skewness and the magnitude of the variables influence the resulting PCs, it is good practice to apply skewness transformation, center and scale the variables prior to the application of PCA
+# - should we apply a transform first to all the data?? take log10 transform to make the variables looks more gaussian
+df_train.pca <- prcomp(df_train_num, center=T, scale=T)
+# - caret package standardizes the data by default
+preProc <- caret::preProcess(df_train_num, method="pca", thresh=0.9)
+preProc
+pcaPred <- predict(preProc, df_train_num)
+sum(pcaPred$PC1 - df_train.pca$x[,"PC1"])
+# - plot
+qplot(x=PC1, y=PC2, data=pcaPred, colour=df_train$classe)
+# - fit a quick model
+#   glm can only be used for 2-class outcomes, linear discriminant analysis
+#   is very popular when you have more than two response classes
+modelFit <- caret::train(df_train$classe ~ . , method="lda", data=pcaPred)
+modelFit2 <- MASS::lda(df_train$classe ~ . ,data=pcaPred)
+names(modelFit2)
+pred2 <- predict(modelFit2, newdata=pcaPred)
+caret::confusionMatrix(df_train$classe, predict(modelFit, newdata=pcaPred))
+caret::confusionMatrix(df_train$classe, pred2$class)
+
+paste(grep("belt",colnames(df_train), value=T), collapse = ",")
+
+cor(dplyr::select(df_train,gyros_belt_x,gyros_belt_y,gyros_belt_z))
+
+ggplot(data=df_train, aes(x=classe, y=gyros_belt_x, colour=classe)) + geom_boxplot() + stat_summary(fun.y=mean, geom="point", shape=5, size=4) + theme(axis.title.x = element_blank(), legend.position='none')
+
+ggplot(data=df_train, aes(x=classe, y=gyros_belt_y, colour=classe)) + geom_boxplot() + stat_summary(fun.y=mean, geom="point", shape=5, size=4) + theme(axis.title.x = element_blank(), legend.position='none')
+
+ggplot(data=df_train, aes(x=classe, y=gyros_belt_z, colour=classe)) + geom_boxplot() + stat_summary(fun.y=mean, geom="point", shape=5, size=4) + theme(axis.title.x = element_blank(), legend.position='none')
+
 
 ```
+
+
+```{r data_pca}
+
+# - Summary:
+#   > takes 19 PCs to explain 90% of the variation
+#   > fitting an LDA model on all 19 PCs gives accuracy=51%
+#   > guessing the data is highly non-linear? or significant interactions?
+
+# - remove non-numeric values
+df_train_num <- df_train %>% dplyr::select(-user_name, -raw_timestamp_part_1, -raw_timestamp_part_2, -cvtd_timestamp, -new_window, -classe)
+
+# - pca: dimension reduction on possibe regressors
+#   PCA is not scale invariant, so it is highly recommended to standardize all the {p} variables before applying PCA. Since skewness and the magnitude of the variables influence the resulting PCs, it is good practice to apply skewness transformation, center and scale the variables prior to the application of PCA
+# - should we apply a transform first to all the data?? take log10 transform to make the variables looks more gaussian
+df_train.pca <- prcomp(df_train_num, center=T, scale=T)
+plot(df_train.pca, type="l")
+plot(summary(df_train.pca)$importance[3,], type="l")
+# - caret package standardizes the data by default, defaults to 95%
+preProc <- caret::preProcess(df_train_num, method="pca")
+preProc
+preProc <- caret::preProcess(df_train_num, method=c("BoxCox", "center", "scale", "pca"), thresh=0.9)
+
+pcaPred <- predict(preProc, df_train_num)
+sum(pcaPred$PC1 - df_train.pca$x[,"PC1"])
+# - plot
+qplot(x=PC1, y=PC2, data=pcaPred, colour=df_train$classe)
+
+# - fit a quick model
+#   glm can only be used for 2-class outcomes, linear discriminant analysis
+#   is very popular when you have more than two response classes
+modelFit <- caret::train(df_train$classe ~ . , method="lda", data=pcaPred)
+caret::confusionMatrix(df_train$classe, predict(modelFit, newdata=pcaPred))
+
+modelFit2 <- MASS::lda(df_train$classe ~ . ,data=pcaPred)
+pred2 <- predict(modelFit2, newdata=pcaPred)
+caret::confusionMatrix(df_train$classe, pred2$class)
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
 
