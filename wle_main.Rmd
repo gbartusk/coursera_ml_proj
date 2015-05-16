@@ -8,6 +8,9 @@ knitr::opts_chunk$set(echo=TRUE, warning=FALSE, message=FALSE)
 ```
 
 
+## Executive Summary
+One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. This analysis uses data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants to classify the quality of barbell lifts. More information is available from the website here: http://groupware.les.inf.puc-rio.br/har (see the section on the Weight Lifting Exercise Dataset). 
+
 ```{r load_pkgs}
 # - load packages
 library(knitr)          # - report writing
@@ -27,12 +30,15 @@ library(rpart)          # - regression trees
 library(rattle)         # - regression tree plots
 library(gbm)            # - boosting with trees
 library(corrgram)       # - correlogram
+library(stargazer)      # - format tables
 
 ```
 
 
+## User Defined Functions
+*__Load Data__*: define data schema and drop columns that have more than 90% missing values.
+*__Write Predictions__*: for each of the 20 unclassified observations, write a text file with its predicted class.
 ```{r load_udfs}
-
 # - load data and clean
 load_data <- function(path)
 {
@@ -84,7 +90,7 @@ load_data <- function(path)
 }
 
 # - generate submission files
-pml_write_files <-  function(x)
+pml_write_files <- function(x)
 {
     n = length(x)
     for(i in 1:n)
@@ -92,14 +98,15 @@ pml_write_files <-  function(x)
         filename = file.path(paste0("problem_id_",i,".txt"))
         write.table(x[i],file=filename,quote=FALSE,row.names=FALSE,col.names=FALSE)
     }
-}
-    
+}   
 ```
 
 
+## Load Data and Split into Train/Test Sets
+After loading the data we split the data into 80% training (for model fitting) and set aside 20% for out-of-sample testing.
 ```{r load_data}
-
 # - Notes on Data Set:
+#   http://groupware.les.inf.puc-rio.br/public/papers/2013.Velloso.QAR-WLE.pdf
 #   > sensors: belt, glove, dumbbell, arm-band
 #   > measurements: three-axes acceleration, gyroscope, magnetometer
 #       > gyroscope: measures orientation
@@ -113,40 +120,52 @@ pml_write_files <-  function(x)
 #       > yaw - nose left or right about an axis running up and down
 #       > roll - rotation about an axis running from nose to tail
 
-# - file paths
+# - data urls
 url_train <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
 url_test <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+
+# - model fit paths (to avoid rerunning)
+path_fit_gbm <- "fit_gbm.rds"
+path_fit_rf <- "fit_rf.rds"
+path_fit_rpart <- "fit_rpart.rds"
 
 # - load data sets
 #   the test file is only 20 observattions and is used for part 2 of assignment
 df_data <- load_data(url_train)
 df_evaluation <- load_data(url_test)
 
-# - check data
-dim(df_data)
-dim(df_evaluation)
-colnames(df_data)[!(colnames(df_data) %in% colnames(df_evaluation))]
+# - data dimensions
+# dim(df_data)
+# dim(df_evaluation)
+# - confirm columns are the same (other than classification)
+# colnames(df_data)[!(colnames(df_data) %in% colnames(df_evaluation))]
 
 # - split into proper training and test
 train_index <- caret::createDataPartition(y=df_data$classe, p=0.8, list=FALSE, times=1)
 df_train <- df_data[train_index,]
 df_test <-  df_data[-train_index,]
 
-# - clean up
-rm(train_index); gc()
+# - check proportions in test and train
+tbl_train <- round(prop.table(table(df_train$classe)),2)*100
+tbl_test <- round(prop.table(table(df_test$classe)),2)*100
+tbl_train
+tbl_test
+tbl_train - tbl_test
+
+# - removing fields that wont be used for model fitting
+df_train_num <- df_train %>% dplyr::select(-user_name, -raw_timestamp_part_1, -raw_timestamp_part_2, -cvtd_timestamp, -new_window)
+
+# - limit to only regressors
+df_train_num_x <- df_train_num %>% dplyr::select(-classe)
 
 ```
 
 
+## Data Visualization 
+Given the data has a high degree of dimensions, we first explore the correlation of the data set and then then investigate the classification by accelerometer location. The correlation is generally larger across sensors for a given location but less so across sensor locations (see table below). We fit a single regression tree to the data which turns out to be an inaccurate predictor. Based on PCA plots the the belt sensor tends to predict class E (throwing hips in front) while the other sensors are not-interpretable based on the first two PCs (see arm plot below).  
 ```{r data_vis}
-
-table(df_train$classe)
-table(df_train$user_name)
-table(df_train$cvtd_timestamp)
-
-# - total correlation
-df_train_num <- df_train %>% dplyr::select(-user_name, -raw_timestamp_part_1, -raw_timestamp_part_2, -cvtd_timestamp, -new_window, -classe)
-corm <- round(cor(df_train_num),2); diag(corm) <- 0
+# - correlation: regressors > 80%
+corm <- cor(df_train_num_x); diag(corm) <- 0
 corm_filter <- which(abs(corm) > 0.8, arr.ind=TRUE)
 top_cor <- data.frame(
     row=corm_filter[,"row"], row_name=rownames(corm_filter), 
@@ -155,159 +174,130 @@ top_cor$key = apply(top_cor[,c("row","col")],1,
     function(m) ifelse(m['row']<m['col'], paste(m['row'],m['col'],sep="_"),
         paste(m['col'],m['row'],sep="_")))
 top_cor <- dplyr::distinct(top_cor, key)
-top_cor$cor = apply(top_cor[,c("row","col")],1, function(m) corm[m['row'],m['col']])
-dplyr::arrange(dplyr::select(top_cor,-row,-col),desc(abs(cor)))
+top_cor$cor = apply(top_cor[,c("row","col")],1, 
+    function(m) round(corm[m['row'],m['col']]*100,2))
+dplyr::arrange(dplyr::select(top_cor,-key,-row,-col),desc(abs(cor)))
 
-
-# - tree classification for vis the data
-df_train_num <- df_train %>% dplyr::select(-user_name, -raw_timestamp_part_1, -raw_timestamp_part_2, -cvtd_timestamp, -new_window)
-fit_rt <- caret::train(classe~., method="rpart", data=df_train_num)
-rattle::fancyRpartPlot(fit_rt$finalModel)
-caret::confusionMatrix(df_train$classe, predict(fit_rt, newdata=df_train_num))
-
-
-
-# - heirarchical clustering / dendrograms
-
+# - fit: single tree classification to help visualize
+#   commenting out fitting after running, long run time
+# fit_rpart <- caret::train(classe~., method="rpart", data=df_train_num)
+# saveRDS(fit_rpart, path_fit_rpart)
+fit_rpart <- readRDS(path_fit_rpart)
+# - plot: single tree
+rattle::fancyRpartPlot(fit_rpart$finalModel, sub="")
+# - accuracy: single tree - bad, doesnt predict D (most likely too related to C)
+cm_rpart_train <- caret::confusionMatrix(df_train$classe, predict(fit_rpart, newdata=df_train_num))
+cm_rpart_train$overall; cm_rpart_train$table
 
 # - grab column names by sensor location
-paste(grep("_belt",colnames(df_train), value=T), collapse = ",")
-paste(grep("_arm",colnames(df_train), value=T), collapse = ",")
-paste(grep("_dumbbell",colnames(df_train), value=T), collapse = ",")
-paste(grep("_forearm",colnames(df_train), value=T), collapse = ",")
+# paste(grep("_belt",colnames(df_train), value=T), collapse = ",")
+# paste(grep("_arm",colnames(df_train), value=T), collapse = ",")
+# paste(grep("_dumbbell",colnames(df_train), value=T), collapse = ",")
+# paste(grep("_forearm",colnames(df_train), value=T), collapse = ",")
 
-# - data: belt
+
+# - belt
 df_train_belt <- dplyr::select(df_train, roll_belt,pitch_belt,yaw_belt,gyros_belt_x,gyros_belt_y,gyros_belt_z,accel_belt_x,accel_belt_y,accel_belt_z,magnet_belt_x,magnet_belt_y,magnet_belt_z)
-# - cor: belt
-round(cor(df_train_belt),2)*100
-corrgram::corrgram(df_train_belt, lower.panel=panel.shade, upper.panel=panel.pie)
-# pca: belt (4)
-pca_belt <- caret::preProcess(df_train_belt, method=c("center", "scale", "pca"), thresh=0.9)
+pca_belt <- caret::preProcess(df_train_belt, method=c("center", "scale", "pca"), pcaComp=2)
 pred_pca_belt <- predict(pca_belt, df_train_belt)
-#colnames(pred_pca_belt) <- paste(colnames(pred_pca_belt),"_belt",sep="")
-# - plot: belt
-df_train_belt <- cbind(classe=df_train$classe, df_train_belt) # pred_pca_belt
-ggplot(data=df_train_belt, aes(x=classe, y=PC1, colour=classe)) + geom_boxplot() + stat_summary(fun.y=mean, geom="point", shape=5, size=4) + theme(axis.title.x = element_blank(), legend.position='none')
-# - regression tree
-fit_rt_belt <- caret::train(classe~., method="rpart", data=df_train_belt)
-rattle::fancyRpartPlot(fit_rt_belt$finalModel)
-# - this only predicts A and E ... E is throwing the hips to the front so makes
-#   sense that the belt monitor would pick this up
-caret::confusionMatrix(df_train_belt$classe, predict(fit_rt_belt, newdata=df_train_belt))
+g1_belt <- qplot(x=PC1, y=PC2, data=pred_pca_belt, colour=df_train$classe)
+g2_belt <- ggplot(data=pred_pca_belt, aes(x=df_train$classe, y=PC1, colour=df_train$classe)) + geom_boxplot() + theme(axis.title.x = element_blank(), legend.position='none') + labs(x="")
+gridExtra::grid.arrange(g1_belt,g2_belt, nrow=2)
 
-
-
-# - data: arm
+# - arm
 df_train_arm <- dplyr::select(df_train, roll_arm,pitch_arm,yaw_arm,total_accel_arm,gyros_arm_x,gyros_arm_y,gyros_arm_z,accel_arm_x,accel_arm_y,accel_arm_z,magnet_arm_x,magnet_arm_y,magnet_arm_z)
-# - cor: arm
-round(cor(df_train_arm),2)*100
-corrgram::corrgram(df_train_arm, lower.panel=panel.shade, upper.panel=panel.pie)
-
-
-ggplot(data=df_train, aes(x=classe, y=gyros_belt_x, colour=classe)) + geom_boxplot() + stat_summary(fun.y=mean, geom="point", shape=5, size=4) + theme(axis.title.x = element_blank(), legend.position='none')
-
-ggplot(data=df_train, aes(x=classe, y=gyros_belt_y, colour=classe)) + geom_boxplot() + stat_summary(fun.y=mean, geom="point", shape=5, size=4) + theme(axis.title.x = element_blank(), legend.position='none')
-
-ggplot(data=df_train, aes(x=classe, y=gyros_belt_z, colour=classe)) + geom_boxplot() + stat_summary(fun.y=mean, geom="point", shape=5, size=4) + theme(axis.title.x = element_blank(), legend.position='none')
-
-
+pca_arm <- caret::preProcess(df_train_arm, method=c("center", "scale", "pca"), pcaComp=2)
+pred_pca_arm <- predict(pca_arm, df_train_arm)
+g1_arm <- qplot(x=PC1, y=PC2, data=pred_pca_arm, colour=df_train$classe) 
+g2_arm <- ggplot(data=pred_pca_arm, aes(x=df_train$classe, y=PC1, colour=df_train$classe)) + geom_boxplot() + theme(axis.title.x = element_blank(), legend.position='none') + labs(x="")
+gridExtra::grid.arrange(g1_arm,g2_arm, nrow=2)
 ```
 
 
+## Principal Component Analysis
+Given the large number of possible regressors and the high correlation among a handful, we apply PCA in attempt to reduce dimensionality. It takes 19 components to explain 90% of the variation in 53 possible regressors (a reduction of 64% of variables); however this is still a large number of factors. Further, we have performed a linear discriminant analysis against all principal componnts and found the accuracy is very low for even in sample (training) data. Given these results, the data is most likely non-linear with respect to the exercise classification.
 ```{r data_pca}
-
-# - Summary:
-#   > takes 19 PCs to explain 90% of the variation
-#   > fitting an LDA model on all 19 PCs gives accuracy=51%
-#   > guessing the data is highly non-linear? or significant interactions?
-
-# - remove non-numeric values
-df_train_num <- df_train %>% dplyr::select(-user_name, -raw_timestamp_part_1, -raw_timestamp_part_2, -cvtd_timestamp, -new_window, -classe)
-
 # - pca: dimension reduction on possibe regressors
-#   PCA is not scale invariant, so it is highly recommended to standardize all the {p} variables before applying PCA. Since skewness and the magnitude of the variables influence the resulting PCs, it is good practice to apply skewness transformation, center and scale the variables prior to the application of PCA
-# - should we apply a transform first to all the data?? take log10 transform to make the variables looks more gaussian
-df_train.pca <- prcomp(df_train_num, center=T, scale=T)
-plot(df_train.pca, type="l")
-plot(summary(df_train.pca)$importance[3,], type="l")
-# - caret package standardizes the data by default, defaults to 95%
-preProc <- caret::preProcess(df_train_num, method="pca")
-preProc
-preProc <- caret::preProcess(df_train_num, method=c("BoxCox", "center", "scale", "pca"), thresh=0.9)
+#   pca is not scale invariant, hence standardizing regressors
+pca_obj <- caret::preProcess(df_train_num_x, thresh=0.9,
+    method=c("BoxCox", "center", "scale", "pca"))
+pca_obj
 
-pcaPred <- predict(preProc, df_train_num)
-sum(pcaPred$PC1 - df_train.pca$x[,"PC1"])
-# - plot
-qplot(x=PC1, y=PC2, data=pcaPred, colour=df_train$classe)
+# - compute new orthogonal regressors
+pred_pca <- predict(pca_obj, df_train_num_x)
 
-# - fit a quick model
-#   glm can only be used for 2-class outcomes, linear discriminant analysis
-#   is very popular when you have more than two response classes
-modelFit <- caret::train(df_train$classe ~ . , method="lda", data=pcaPred)
-caret::confusionMatrix(df_train$classe, predict(modelFit, newdata=pcaPred))
+# - plot: first two components by class
+qplot(x=PC1, y=PC2, data=pred_pca, colour=df_train$classe)
 
-modelFit2 <- MASS::lda(df_train$classe ~ . ,data=pcaPred)
-pred2 <- predict(modelFit2, newdata=pcaPred)
-caret::confusionMatrix(df_train$classe, pred2$class)
+# - fit a quick model using linear discriminant analysis against all components
+#   glm can only be used for 2-class outcomes
+fit_lda <- caret::train(df_train$classe ~ . , method="lda", data=pred_pca)
 
+# - accuracy: train - very low, hard to imagine true model being linear anyways
+cm_pca_train <- caret::confusionMatrix(df_train$classe, predict(fit_lda, newdata=pred_pca))
+cm_pca_train$overall; cm_pca_train$table
 
 ```
 
 
-```{r model}
+## Modeling
+We apply two non-parametric tree based models in order to predict the outcome of the quality of the dumbell exercise. Both models are fit on all numeric data available and use both bootstrapping to cross-validate the error rates as well as an independent out-of-sample test data set (ie not used for model fitting).  
 
-# - numeric only data
-df_train_num <- df_train %>% dplyr::select(-user_name, -raw_timestamp_part_1, -raw_timestamp_part_2, -cvtd_timestamp, -new_window)
+*__Boosting__*: As seen above, a single regression tree does a bad job classifying the data and will suffer from high variance. Here we perform bootstrap aggregation (aka bagging) in order to reduce variance and hence increase prediction accuracy. We construct 100 different trees (ie cross-validation is bootstrapping) and for a given observation we record the class predicted by each of the trees and then take a majority vote to get the overall prediction. Further, after cross-validating to compute the accuracy - 99.3% - we run the fitted model on a completely seperate test data set to obtain an independent estimate of the error rate. The test data error rate is 98.7%.
+```{r model_boosting}
+# - fit: train - commenting out fitting after running, long run time
+# fit_gbm <- train(classe ~ ., data=df_train_num, method="gbm", verbose=F)
+# saveRDS(fit_gbm, path_fit_gbm)
 
-
-#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-# - Boosting
-
-# - fit: train 
-fit_gbm <- train(classe ~ ., data=df_train_num, method="gbm", verbose=F)
-fit_gbm
+# - load: fitted model
+fit_gbm <- readRDS(path_fit_gbm)
+#fit_gbm
 
 # - accuracy: train
-caret::confusionMatrix(df_train_num$classe, predict(fit_gbm, newdata=df_train_num))
+cm_gbm_train <- caret::confusionMatrix(df_train_num$classe, predict(fit_gbm, newdata=df_train_num))
+cm_gbm_train$overall; cm_gbm_train$table
 
 # - accuracy: test
-caret::confusionMatrix(df_test$classe, predict(fit_gbm, newdata=df_test))
+cm_gbm_test <- caret::confusionMatrix(df_test$classe, predict(fit_gbm, newdata=df_test))
+cm_gbm_test$overall; cm_gbm_test$table
 
 # - predict: train fit
 pred_gbm_train_eval_class <- predict(fit_gbm, newdata=df_evaluation)
+```
+  
+*__Random Forests__*: In an attempt to improve on (the all ready highly accurate) boosting model, we apply a random forest model to the data. Random forests help to decorrelate the trees by only considering a subset of the predictors at each split; this prevents a single strong predictor from being applied in every bootstrapped iteration and hence can lead to a further reduction in the variation. 500 trees are constructed here. Further, after cross-validating to compute the accuracy - 100% - we run the fitted model on a completely seperate test data set to obtain an independent estimate of the error rate. The test data error rate is 99.7%.
+```{r model_random_forests}
+# - fit: train - commenting out fitting after running, long run time
+# fit_rf <- caret::train(classe~., method="rf", data=df_train_num)
+# saveRDS(fit_rf, path_fit_rf)
 
-
-#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-# - Random Forests
-
-# - fit: train
-fit_rf <- caret::train(classe~., method="rf", data=df_train_num)
-fit_rf
+# - load: fitted model
+fit_rf <- readRDS(path_fit_rf)
+#fit_rf
 
 # - accuracy: train
-caret::confusionMatrix(df_train_num$classe, predict(fit_rf, newdata=df_train_num))
+cm_rf_train <- caret::confusionMatrix(df_train_num$classe, predict(fit_rf, newdata=df_train_num))
+cm_rf_train$overall; cm_rf_train$table
 
 # - accuracy: test
-caret::confusionMatrix(df_test$classe, predict(fit_rf, newdata=df_test))
+cm_rf_test <- caret::confusionMatrix(df_test$classe, predict(fit_rf, newdata=df_test))
+cm_rf_test$overall; cm_rf_test$table
 
 # - predict: train fit
 pred_rf_train_eval_class <- predict(fit_rf, newdata=df_evaluation)
-
-
-#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-# - Submission
-
-# - compare: gbm vs rf (same results)
-caret::confusionMatrix(pred_gbm_train_eval_class, pred_rf_train_eval_class)
-
-# - write out (using rf given slightly high test error rate)
-pml_write_files(pred_rf_train_eval_class)
-
-
 ```
+  
+*__20 Observation Prediction__*: Given the very large high accuracy on the data of both boosting and random forests we test if they produce the same results on the 20 observations which are required to predict - both models yield the same results.
+```{r prediction}
+# - compare: gbm vs rf - the two classifiers produce the same results
+model_compare <- caret::confusionMatrix(pred_gbm_train_eval_class, pred_rf_train_eval_class)
+model_compare$overall
 
-
-
+# - write submission files - using rf, given slightly higher test error rate
+#   commenting out after submitted to coursera
+#pml_write_files(pred_rf_train_eval_class)
+pred_rf_train_eval_class
+```
 
 
 
