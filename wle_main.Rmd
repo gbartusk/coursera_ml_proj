@@ -1,5 +1,5 @@
 ---
-title: "Weight Lifting Exercises"
+title: "Predicting the Quality of Weight Lifting"
 output: html_document
 ---
 
@@ -18,8 +18,7 @@ library(readr)          # - fast csv reads
 library(RCurl)          # - network interface
 library(lubridate)      # - date functions
 library(Metrics)        # - supervised learning evaluation metrics
-library(ggmap)          # - maps
-library(Hmisc)          # - 
+library(Hmisc)          # - miscellaneous data analysis function
 library(MASS)           # - applied stats methods
 library(class)          # - functions for classification
 library(caret)          # - model training functions
@@ -27,14 +26,14 @@ library(pryr)           # - check memory
 library(rpart)          # - regression trees
 library(rattle)         # - regression tree plots
 library(gbm)            # - boosting with trees
-
-library(PerformanceAnalytics)
+library(corrgram)       # - correlogram
 
 ```
 
 
 ```{r load_udfs}
-# - load data
+
+# - load data and clean
 load_data <- function(path)
 {
     # - required libraries
@@ -83,23 +82,58 @@ load_data <- function(path)
     # - return
     invisible(df_data)
 }
+
+# - generate submission files
+pml_write_files <-  function(x)
+{
+    n = length(x)
+    for(i in 1:n)
+    {
+        filename = file.path(paste0("problem_id_",i,".txt"))
+        write.table(x[i],file=filename,quote=FALSE,row.names=FALSE,col.names=FALSE)
+    }
+}
     
 ```
 
 
 ```{r load_data}
+
+# - Notes on Data Set:
+#   > sensors: belt, glove, dumbbell, arm-band
+#   > measurements: three-axes acceleration, gyroscope, magnetometer
+#       > gyroscope: measures orientation
+#       > magnetometer: estimate body inclination while being insensitive to acceleration
+#   > Class: A is correct, other 4 classes correspond to common mistakes
+#       > good - A
+#       > bad - B: elbows to front, C: up halfway, D: down half, E: throw hips
+#   > Euler angles (roll, pitch, and yaw) - "aircraft principal axes"
+#       > An aircraft in flight is free to rotate in three dimensions: 
+#       > pitch - nose up or down about an axis running from wing to wing
+#       > yaw - nose left or right about an axis running up and down
+#       > roll - rotation about an axis running from nose to tail
+
 # - file paths
 url_train <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
 url_test <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
 
 # - load data sets
-df_train <- load_data(url_train)
-df_test <- load_data(url_test)
+#   the test file is only 20 observattions and is used for part 2 of assignment
+df_data <- load_data(url_train)
+df_evaluation <- load_data(url_test)
 
 # - check data
-dim(df_train)
-dim(df_test)
-colnames(df_train)[!(colnames(df_train) %in% colnames(df_test))]
+dim(df_data)
+dim(df_evaluation)
+colnames(df_data)[!(colnames(df_data) %in% colnames(df_evaluation))]
+
+# - split into proper training and test
+train_index <- caret::createDataPartition(y=df_data$classe, p=0.8, list=FALSE, times=1)
+df_train <- df_data[train_index,]
+df_test <-  df_data[-train_index,]
+
+# - clean up
+rm(train_index); gc()
 
 ```
 
@@ -110,32 +144,65 @@ table(df_train$classe)
 table(df_train$user_name)
 table(df_train$cvtd_timestamp)
 
+# - total correlation
 df_train_num <- df_train %>% dplyr::select(-user_name, -raw_timestamp_part_1, -raw_timestamp_part_2, -cvtd_timestamp, -new_window, -classe)
+corm <- round(cor(df_train_num),2); diag(corm) <- 0
+corm_filter <- which(abs(corm) > 0.8, arr.ind=TRUE)
+top_cor <- data.frame(
+    row=corm_filter[,"row"], row_name=rownames(corm_filter), 
+    col=corm_filter[,"col"], col_name=colnames(corm)[as.vector(corm_filter[,"col"])])
+top_cor$key = apply(top_cor[,c("row","col")],1, 
+    function(m) ifelse(m['row']<m['col'], paste(m['row'],m['col'],sep="_"),
+        paste(m['col'],m['row'],sep="_")))
+top_cor <- dplyr::distinct(top_cor, key)
+top_cor$cor = apply(top_cor[,c("row","col")],1, function(m) corm[m['row'],m['col']])
+dplyr::arrange(dplyr::select(top_cor,-row,-col),desc(abs(cor)))
 
-# - pca: dimension reduction on possibe regressors
-#   PCA is not scale invariant, so it is highly recommended to standardize all the {p} variables before applying PCA. Since skewness and the magnitude of the variables influence the resulting PCs, it is good practice to apply skewness transformation, center and scale the variables prior to the application of PCA
-# - should we apply a transform first to all the data?? take log10 transform to make the variables looks more gaussian
-df_train.pca <- prcomp(df_train_num, center=T, scale=T)
-# - caret package standardizes the data by default
-preProc <- caret::preProcess(df_train_num, method="pca", thresh=0.9)
-preProc
-pcaPred <- predict(preProc, df_train_num)
-sum(pcaPred$PC1 - df_train.pca$x[,"PC1"])
-# - plot
-qplot(x=PC1, y=PC2, data=pcaPred, colour=df_train$classe)
-# - fit a quick model
-#   glm can only be used for 2-class outcomes, linear discriminant analysis
-#   is very popular when you have more than two response classes
-modelFit <- caret::train(df_train$classe ~ . , method="lda", data=pcaPred)
-modelFit2 <- MASS::lda(df_train$classe ~ . ,data=pcaPred)
-names(modelFit2)
-pred2 <- predict(modelFit2, newdata=pcaPred)
-caret::confusionMatrix(df_train$classe, predict(modelFit, newdata=pcaPred))
-caret::confusionMatrix(df_train$classe, pred2$class)
 
-paste(grep("belt",colnames(df_train), value=T), collapse = ",")
+# - tree classification for vis the data
+df_train_num <- df_train %>% dplyr::select(-user_name, -raw_timestamp_part_1, -raw_timestamp_part_2, -cvtd_timestamp, -new_window)
+fit_rt <- caret::train(classe~., method="rpart", data=df_train_num)
+rattle::fancyRpartPlot(fit_rt$finalModel)
+caret::confusionMatrix(df_train$classe, predict(fit_rt, newdata=df_train_num))
 
-cor(dplyr::select(df_train,gyros_belt_x,gyros_belt_y,gyros_belt_z))
+
+
+# - heirarchical clustering / dendrograms
+
+
+# - grab column names by sensor location
+paste(grep("_belt",colnames(df_train), value=T), collapse = ",")
+paste(grep("_arm",colnames(df_train), value=T), collapse = ",")
+paste(grep("_dumbbell",colnames(df_train), value=T), collapse = ",")
+paste(grep("_forearm",colnames(df_train), value=T), collapse = ",")
+
+# - data: belt
+df_train_belt <- dplyr::select(df_train, roll_belt,pitch_belt,yaw_belt,gyros_belt_x,gyros_belt_y,gyros_belt_z,accel_belt_x,accel_belt_y,accel_belt_z,magnet_belt_x,magnet_belt_y,magnet_belt_z)
+# - cor: belt
+round(cor(df_train_belt),2)*100
+corrgram::corrgram(df_train_belt, lower.panel=panel.shade, upper.panel=panel.pie)
+# pca: belt (4)
+pca_belt <- caret::preProcess(df_train_belt, method=c("center", "scale", "pca"), thresh=0.9)
+pred_pca_belt <- predict(pca_belt, df_train_belt)
+#colnames(pred_pca_belt) <- paste(colnames(pred_pca_belt),"_belt",sep="")
+# - plot: belt
+df_train_belt <- cbind(classe=df_train$classe, df_train_belt) # pred_pca_belt
+ggplot(data=df_train_belt, aes(x=classe, y=PC1, colour=classe)) + geom_boxplot() + stat_summary(fun.y=mean, geom="point", shape=5, size=4) + theme(axis.title.x = element_blank(), legend.position='none')
+# - regression tree
+fit_rt_belt <- caret::train(classe~., method="rpart", data=df_train_belt)
+rattle::fancyRpartPlot(fit_rt_belt$finalModel)
+# - this only predicts A and E ... E is throwing the hips to the front so makes
+#   sense that the belt monitor would pick this up
+caret::confusionMatrix(df_train_belt$classe, predict(fit_rt_belt, newdata=df_train_belt))
+
+
+
+# - data: arm
+df_train_arm <- dplyr::select(df_train, roll_arm,pitch_arm,yaw_arm,total_accel_arm,gyros_arm_x,gyros_arm_y,gyros_arm_z,accel_arm_x,accel_arm_y,accel_arm_z,magnet_arm_x,magnet_arm_y,magnet_arm_z)
+# - cor: arm
+round(cor(df_train_arm),2)*100
+corrgram::corrgram(df_train_arm, lower.panel=panel.shade, upper.panel=panel.pie)
+
 
 ggplot(data=df_train, aes(x=classe, y=gyros_belt_x, colour=classe)) + geom_boxplot() + stat_summary(fun.y=mean, geom="point", shape=5, size=4) + theme(axis.title.x = element_blank(), legend.position='none')
 
@@ -187,6 +254,57 @@ caret::confusionMatrix(df_train$classe, pred2$class)
 ```
 
 
+```{r model}
+
+# - numeric only data
+df_train_num <- df_train %>% dplyr::select(-user_name, -raw_timestamp_part_1, -raw_timestamp_part_2, -cvtd_timestamp, -new_window)
+
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# - Boosting
+
+# - fit: train 
+fit_gbm <- train(classe ~ ., data=df_train_num, method="gbm", verbose=F)
+fit_gbm
+
+# - accuracy: train
+caret::confusionMatrix(df_train_num$classe, predict(fit_gbm, newdata=df_train_num))
+
+# - accuracy: test
+caret::confusionMatrix(df_test$classe, predict(fit_gbm, newdata=df_test))
+
+# - predict: train fit
+pred_gbm_train_eval_class <- predict(fit_gbm, newdata=df_evaluation)
+
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# - Random Forests
+
+# - fit: train
+fit_rf <- caret::train(classe~., method="rf", data=df_train_num)
+fit_rf
+
+# - accuracy: train
+caret::confusionMatrix(df_train_num$classe, predict(fit_rf, newdata=df_train_num))
+
+# - accuracy: test
+caret::confusionMatrix(df_test$classe, predict(fit_rf, newdata=df_test))
+
+# - predict: train fit
+pred_rf_train_eval_class <- predict(fit_rf, newdata=df_evaluation)
+
+
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# - Submission
+
+# - compare: gbm vs rf (same results)
+caret::confusionMatrix(pred_gbm_train_eval_class, pred_rf_train_eval_class)
+
+# - write out (using rf given slightly high test error rate)
+pml_write_files(pred_rf_train_eval_class)
+
+
+```
 
 
 
